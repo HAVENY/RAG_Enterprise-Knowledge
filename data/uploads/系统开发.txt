@@ -1,0 +1,1 @@
+企业知识库系统使用 FastAPI 作为后端服务，使用 Streamlit 作为前端页面，使用 MySQL 存储文档信息。
