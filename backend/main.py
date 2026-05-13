@@ -101,20 +101,26 @@ def list_documents(db: Session = Depends(get_db)):
 
 
 @app.post("/ask")
-def ask_question(
-    request: QuestionRequest,
-    db: Session = Depends(get_db),
-):
-    if not request.question.strip():
-        raise HTTPException(status_code=400, detail="问题不能为空")
-
+def ask_question(request: QuestionRequest, db: Session = Depends(get_db)):
     result = rag_answer(
         question=request.question,
         db=db,
+        provider=request.provider,
+        model_level=request.model_level,
+        allow_general_answer=request.allow_general_answer,
     )
 
-    return {
-        "question": request.question,
-        "answer": result["answer"],
-        "sources": result.get("sources", []),
-    }
+    return result
+
+
+
+@app.post("/chat")
+def chat(request: QuestionRequest, db: Session = Depends(get_db)):
+    result = rag_answer(
+        question=request.question,
+        db=db,
+        model_level=request.model_level,
+        allow_general_answer=request.allow_general_answer,
+    )
+
+    return result

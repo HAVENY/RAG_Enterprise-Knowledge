@@ -1,1 +1,5 @@
-企业知识库系统使用 FastAPI 作为后端服务，使用 Streamlit 作为前端页面，使用 MySQL 存储文档信息。
+本系统采用 FastAPI 作为后端服务框架，Streamlit 作为前端交互界面。
+数据库采用 MySQL 或 PostgreSQL。
+向量数据库采用 FAISS。
+Embedding 模型采用 bge-large-zh 或 text-embedding-3。
+大语言模型采用 Qwen，并预留 qwen-turbo、qwen-plus、qwen-max 多模型切换能力。
