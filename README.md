@@ -36,14 +36,14 @@
 - `backend/vector_store.py`：FAISS 索引读写与增量更新。
 - `backend/rag.py`：RAG 检索与回答编排逻辑。
 - `backend/llm.py`：多模型统一调用层（Provider + Model Level）。
-- `backend/models.py`：SQLite 数据模型（`documents`、`document_chunks`）。
+- `backend/models.py`：MySQL数据模型（`documents`、`document_chunks`）。
 - `frontend/app.py`：Streamlit 交互界面。
 
 ### 1.3 数据流（上传到问答）
 
 1. 上传文档到后端。
 2. 解析文档正文并切片。
-3. 切片写入 SQLite，同时写入/追加 FAISS 索引。
+3. 切片写入 MySQL，同时写入/追加 FAISS 索引。
 4. 用户提问后进行相似度检索（TopK）。
 5. 拼接检索片段进入 Prompt，调用模型生成答案。
 6. 返回答案 + 来源片段，实现可追溯问答。
