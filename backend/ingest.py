@@ -95,7 +95,7 @@ def split_text(text: str) -> list[str]:
     return splitter.split_text(text)
 
 
-def ingest_file(file_path: str, document_id: int, db: Session) -> str:
+def ingest_file(file_path: str, document_id: int, db: Session) -> dict:
     """
     解析文档正文，切分为 chunk，写入 document_chunks 表，并写入 FAISS。
     """
@@ -106,6 +106,15 @@ def ingest_file(file_path: str, document_id: int, db: Session) -> str:
         raise ValueError("文档内容为空，可能是扫描版 PDF 或暂不支持的格式。")
 
     chunks = split_text(text)
+
+    if not chunks:
+        raise ValueError("文档切片结果为空，请检查切片参数或文档内容。")
+
+    db.query(DocumentChunk).filter(
+        DocumentChunk.document_id == document_id
+    ).delete()
+
+    db.commit()
 
     metadatas = []
 
@@ -134,4 +143,8 @@ def ingest_file(file_path: str, document_id: int, db: Session) -> str:
         metadatas=metadatas,
     )
 
-    return text
+    return {
+        "text": text,
+        "text_length": len(text),
+        "chunk_count": len(chunks),
+    }

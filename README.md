@@ -1,192 +1,315 @@
 # Enterprise Knowledge Base
 
-一个基于 **FastAPI + Streamlit + LangChain + FAISS** 的企业知识库问答系统。  
-核心目标：让内部文档可被结构化检索，并通过大模型进行可追溯问答。
+一个基于 **FastAPI + Streamlit + LangChain + FAISS + MySQL** 的企业知识库问答系统。
+
+系统支持批量上传企业文档，解析后写入 MySQL 与 FAISS 向量索引，并通过 RAG 方式调用大模型生成可追溯回答。当前前端已经包含文档上传、文档管理、切片查看、知识库重建和知识问答能力。
 
 ---
 
-## 1. 架构说明
+## 1. 当前状态
 
-### 1.1 总体架构
+当前已完成：
+
+- 多格式文档上传：`txt`、`md`、`pdf`、`docx`、`csv`、`xlsx`
+- 上传文件统一保存到 `data/uploads`
+- 文档元数据与切片写入 MySQL
+- FAISS 向量索引写入与加载
+- 知识库索引重建
+- 删除文档后自动重建索引
+- 前端查看文档列表、切片数量和切片全文
+- 前端支持按关键词筛选当前文档切片
+- RAG 问答返回答案、来源片段、模型供应商、模型档位
+- 支持 Qwen / MIMO 模型供应商切换
+- embedding 优先使用本地 HuggingFace 模型，不可用时自动降级到本地哈希 embedding
+
+当前验证结果：
 
 ```text
-[Frontend / Streamlit]
-        |
-        v
-[Backend / FastAPI API Layer]
-   |            |
-   |            +--> [LLM Router: Qwen / MIMO]
-   |
-   +--> [Ingest Pipeline]
-           |
-           +--> 文档解析（txt/md/pdf/docx/csv/xlsx）
-           +--> 文本切片（chunk）
-           +--> 向量化（Embedding）
-           +--> FAISS 向量索引
-           +--> SQLite 元数据（文档/切片）
-
-问答路径：
-用户问题 -> 向量检索 TopK -> 组装上下文 Prompt -> LLM 流式生成 -> 前端展示
+documents = 12
+chunks = 87
+missing_paths = []
+faiss_index = index.faiss + index.pkl
 ```
 
-### 1.2 模块划分
+---
 
-- `backend/main.py`：API 入口，提供上传、问答、文档列表等接口。
-- `backend/ingest.py`：文档解析与切片入库流程。
-- `backend/vector_store.py`：FAISS 索引读写与增量更新。
-- `backend/rag.py`：RAG 检索与回答编排逻辑。
-- `backend/llm.py`：多模型统一调用层（Provider + Model Level）。
-- `backend/models.py`：MySQL数据模型（`documents`、`document_chunks`）。
-- `frontend/app.py`：Streamlit 交互界面。
+## 2. 架构说明
 
-### 1.3 数据流（上传到问答）
+```text
+[Streamlit Frontend]
+        |
+        v
+[FastAPI Backend]
+   |
+   +--> Upload / Document API
+   |       |
+   |       +--> data/uploads
+   |       +--> MySQL: documents, document_chunks
+   |
+   +--> Ingest Pipeline
+   |       |
+   |       +--> 文档解析
+   |       +--> 文本切片
+   |       +--> embedding
+   |       +--> FAISS
+   |
+   +--> RAG Pipeline
+           |
+           +--> FAISS TopK 检索
+           +--> Prompt 组装
+           +--> Qwen / MIMO
+           +--> 答案 + 来源片段
+```
 
-1. 上传文档到后端。
-2. 解析文档正文并切片。
-3. 切片写入 MySQL，同时写入/追加 FAISS 索引。
-4. 用户提问后进行相似度检索（TopK）。
-5. 拼接检索片段进入 Prompt，调用模型生成答案。
-6. 返回答案 + 来源片段，实现可追溯问答。
+### 2.1 主要模块
+
+- `backend/main.py`：FastAPI 入口，提供上传、文档列表、切片查看、删除、重建、问答接口。
+- `backend/config.py`：配置读取，默认读取项目根目录 `.env`。
+- `backend/db.py`：SQLAlchemy 数据库连接。
+- `backend/models.py`：MySQL 表模型，包含 `documents` 和 `document_chunks`。
+- `backend/storage.py`：统一上传路径，兼容旧路径并修复历史混乱路径。
+- `backend/ingest.py`：文档解析、切片、写入切片表、写入 FAISS。
+- `backend/vector_store.py`：FAISS 读写、索引清理、embedding 获取与兜底。
+- `backend/rag.py`：检索增强问答逻辑。
+- `backend/llm.py`：Qwen / MIMO 统一调用。
+- `frontend/app.py`：Streamlit 前端界面。
 
 ---
 
-## 2. 关键 Prompt 与 Vibe 思路
+## 3. 路径规则
 
-### 2.1 Prompt 设计目标
+当前统一路径：
 
-- **优先依据知识库回答**：避免脱离企业文档“自由发挥”。
-- **不确定时显式说明**：信息不足时明确“无法完整确定”，降低幻觉风险。
-- **输出结构清晰**：对流程/制度类问题优先分点表达，便于业务同学阅读。
+```text
+data/uploads/
+```
 
-### 2.2 关键 Prompt 结构（RAG）
+所有新上传文件都会保存到该目录。
 
-RAG Prompt 核心包含三段：
+历史上项目曾出现过旧路径，例如：
 
-1. **角色与约束**：企业知识库问答助手，禁止编造内部信息。  
-2. **检索上下文**：注入 TopK 片段作为唯一高优先级依据。  
-3. **用户问题与输出要求**：围绕问题作答，信息不足时明确说明。
+```text
+uploads/
+../uploads/
+../data/uploads/
+```
 
-可在 `backend/rag.py` 的 `build_rag_prompt` 中继续优化：
-- 增加答案模板（结论 / 依据 / 风险 / 下一步）
-- 增加引用标记规范（如片段编号）
-- 区分事实问题与总结问题的不同语气与粒度
-
-### 2.3 Vibe（回答风格）思路
-
-当前策略偏向：
-- **专业稳健**：尽量事实化与中性表达。
-- **可审计**：返回来源元数据，便于复核。
-- **可运营**：支持模型档位切换（fast/default/strong），平衡速度与效果。
+现在 `backend/storage.py` 会在重建索引时按文件名自动查找这些旧路径。如果找到文件，会把数据库中的 `file_path` 修正为当前统一路径；如果找不到，会把该文档写入 `skipped_documents`，不会让整个重建流程失败。
 
 ---
 
-## 3. AI 调用逻辑（流式）
+## 4. 数据库
 
-### 3.1 目标
+当前运行配置使用 MySQL：
 
-将问答接口升级为 **Streaming**：后端边生成边返回，前端逐段展示，降低首字延迟并提升交互体验。
+```env
+DATABASE_URL=mysql+pymysql://user:password@localhost:3306/enterprise_kb?charset=utf8mb4
+```
 
-### 3.2 推荐实现方式
+代码里 `backend/config.py` 保留了 SQLite 默认值，只是兜底配置。实际运行以 `.env` 中的 `DATABASE_URL` 为准。
 
-- 后端：FastAPI 使用 `StreamingResponse`。
-- 传输：建议 `text/event-stream`（SSE）或 chunked 文本流。
-- 前端：Streamlit 使用流式读取并实时刷新回答区。
+主要表：
 
-### 3.3 后端关键流程（逻辑）
-
-1. 完成检索并构造 Prompt。
-2. 选择 Provider 与 Model。
-3. 调用 LLM 的流式接口（`stream=True`）。
-4. 将增量 token 按事件持续 yield 给客户端。
-5. 结束时返回完成标记与来源信息。
-
-### 3.4 前端关键流程（逻辑）
-
-1. 发起问答请求到流式接口（如 `/ask/stream`）。
-2. 持续读取事件流。
-3. 每次收到 token 即刷新页面文本。
-4. 流结束后展示来源片段与模型信息。
+- `documents`：文档记录，保存文件名、文件路径、解析文本、创建时间。
+- `document_chunks`：文档切片，保存文档 ID、切片文本、切片序号。
 
 ---
 
-## 4. 部署步骤
+## 5. 索引重建
 
-### 4.1 环境准备
+后端提供两个等价接口：
 
-- Python 3.10+（推荐 3.11/3.12）
-- 可联网下载依赖与模型
-- Windows / Linux / macOS 均可
+```http
+POST /rebuild
+POST /documents/rebuild
+```
 
-### 4.2 安装依赖
+重建流程：
+
+1. 清空 `backend/vector_store/faiss_index` 中的索引文件。
+2. 删除 MySQL 中的旧切片记录。
+3. 遍历所有文档记录。
+4. 使用 `resolve_document_path` 修正路径。
+5. 重新解析文档并切片。
+6. 写入 `document_chunks`。
+7. 写入新的 FAISS 索引。
+8. 返回成功文档、跳过文档和切片数量。
+
+注意：Windows 下不再删除整个 `faiss_index` 目录，只清空目录内容，避免目录被占用时出现 `PermissionError`。
+
+---
+
+## 6. Embedding 策略
+
+系统优先使用 `.env` 中的：
+
+```env
+EMBEDDING_MODEL_NAME=sentence-transformers/all-MiniLM-L6-v2
+```
+
+加载方式为本地优先：
+
+```python
+model_kwargs={"device": "cpu", "local_files_only": True}
+```
+
+如果本地模型不可用，系统会自动降级到 `LocalHashEmbeddings`，保证上传、切片、重建和检索流程可以继续跑通。
+
+生产环境建议准备稳定的中文或多语言 embedding 模型，并确保服务机器可以离线加载该模型。
+
+---
+
+## 7. 前端功能
+
+Streamlit 前端当前包含：
+
+- 批量上传文档
+- 查看已上传文档
+- 查看每个文档的切片数量
+- 点击“查看切片”查看切片全文
+- 按关键词筛选当前文档切片
+- 删除文档
+- 重建知识库索引
+- 选择模型供应商：Qwen / MIMO
+- 选择模型档位：fast / default / strong
+- 知识库问答
+- 查看回答来源片段
+
+---
+
+## 8. API 概览
+
+### 健康检查
+
+```http
+GET /
+```
+
+### 上传文档
+
+```http
+POST /upload
+```
+
+### 文档列表
+
+```http
+GET /documents
+```
+
+### 查看文档切片
+
+```http
+GET /documents/{document_id}/chunks
+```
+
+### 删除文档
+
+```http
+DELETE /documents/{document_id}
+```
+
+删除后会自动重建索引。
+
+### 重建索引
+
+```http
+POST /rebuild
+POST /documents/rebuild
+```
+
+### 知识问答
+
+```http
+POST /ask
+POST /chat
+```
+
+请求示例：
+
+```json
+{
+  "question": "请总结这份文档的主要内容",
+  "provider": "qwen",
+  "model_level": "default",
+  "allow_general_answer": false
+}
+```
+
+---
+
+## 9. 本地运行
+
+### 9.1 安装依赖
 
 ```powershell
-# 进入项目根目录
-cd Enterprise_knowledge_base
-
-# 创建虚拟环境
 python -m venv .venv
-
-# 激活（Windows PowerShell）
 .\.venv\Scripts\Activate.ps1
-
-# 安装依赖
 pip install -r requirements.txt
 ```
 
-### 4.3 配置环境变量
+当前项目本机也存在外层虚拟环境：
 
-在项目根目录创建 `.env`（示例）：
-
-```env
-APP_ENV=development
-
-# LLM 默认配置
-DEFAULT_LLM_PROVIDER=qwen
-DEFAULT_MODEL_LEVEL=default
-
-# Qwen
-DASHSCOPE_API_KEY=your_dashscope_key
-DASHSCOPE_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
-
-# MIMO
-MIMO_API_KEY=your_mimo_key
-MIMO_BASE_URL=https://token-plan-cn.xiaomimimo.com/v1
+```powershell
+..\EKB_env\Scripts\python.exe
 ```
 
-### 4.4 启动后端
+### 9.2 配置环境变量
+
+项目提供 `.env_example` 作为模板。真实 `.env` 不应提交到仓库。
+
+需要重点配置：
+
+- `DATABASE_URL`
+- `DASHSCOPE_API_KEY`
+- `MIMO_API_KEY`
+- `EMBEDDING_MODEL_NAME`
+
+### 9.3 启动后端
 
 ```powershell
 uvicorn backend.main:app --host 0.0.0.0 --port 8000 --reload
 ```
 
-### 4.5 启动前端
+默认 API：
+
+```text
+http://127.0.0.1:8000
+```
+
+### 9.4 启动前端
 
 ```powershell
 streamlit run frontend/app.py
 ```
 
-默认访问：
-- 后端 API: `http://127.0.0.1:8000`
-- 前端页面: `http://localhost:8501`
+默认页面：
 
-### 4.6 生产部署建议
-
-- 使用 `gunicorn + uvicorn workers`（Linux）或容器化部署。
-- 将 `.env` 中密钥迁移到安全配置中心。
-- 为上传目录、数据库和向量索引配置持久化卷。
-- 在网关层增加鉴权、限流与审计日志。
+```text
+http://localhost:8501
+```
 
 ---
 
-## 项目状态
+## 10. Git 注意事项
 
-当前已具备可运行的企业知识库原型：
-- 多格式文档入库
-- 向量检索 + RAG 问答
-- 多模型切换
-- 来源可追溯
+`.gitignore` 已忽略：
 
-下一步建议优先完成：
-1. `/ask/stream` 流式问答接口落地
-2. 检索质量评测与重排
-3. 权限与多租户隔离
+- `.env`
+- 虚拟环境
+- `__pycache__`
+- `data/uploads/*`
+- `backend/vector_store/faiss_index/`
+- 本地数据库文件
+
+不要提交真实业务文件、真实 API Key、FAISS 索引文件或 Python 缓存文件。
+
+---
+
+## 11. 下一步建议
+
+1. 清理已有 `__pycache__` 和历史根目录 `uploads` 脏文件。
+2. 优化前端中文编码显示，确保所有文案稳定为 UTF-8。
+3. 增加 `/ask/stream` 流式问答接口。
+4. 增加检索评分、rerank 和命中片段高亮。
+5. 增加权限控制、审计日志和多用户隔离。

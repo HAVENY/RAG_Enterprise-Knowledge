@@ -1,46 +1,79 @@
-from pathlib import Path
-from typing import List
-
 from sqlalchemy.orm import Session
-from langchain_core.documents import Document as LCDocument
 
-from .models import Document
-from .ingest import load_file
-from .vector_store import rebuild_documents_to_vector_store
+from .ingest import ingest_file
+from .models import Document, DocumentChunk
+from .storage import resolve_document_path
+from .vector_store import reset_faiss_index
 
 
 def rebuild_vector_store(db: Session):
-    documents = db.query(Document).all()
+    documents = db.query(Document).order_by(Document.id.asc()).all()
 
-    all_chunks: List[LCDocument] = []
+    reset_faiss_index()
+    db.query(DocumentChunk).delete()
+    db.commit()
 
-    valid_document_count = 0
+    rebuilt_documents = []
+    skipped_documents = []
+    total_chunk_count = 0
 
-    for doc in documents:
-        file_path = Path(doc.file_path)
+    for document in documents:
+        file_path = resolve_document_path(document.file_path, document.filename)
 
         if not file_path.exists():
-            continue
-
-        valid_document_count += 1
-
-        chunks = load_file(str(file_path))
-
-        for chunk in chunks:
-            chunk.metadata.update(
+            skipped_documents.append(
                 {
-                    "document_id": doc.id,
-                    "filename": doc.filename,
-                    "file_path": doc.file_path,
+                    "document_id": document.id,
+                    "filename": document.filename,
+                    "old_file_path": document.file_path,
+                    "reason": "file_not_found",
                 }
             )
+            continue
 
-        all_chunks.extend(chunks)
+        canonical_path = str(file_path)
+        if document.file_path != canonical_path:
+            document.file_path = canonical_path
+            db.commit()
 
-    rebuild_documents_to_vector_store(all_chunks)
+        try:
+            ingest_result = ingest_file(
+                file_path=canonical_path,
+                document_id=document.id,
+                db=db,
+            )
+        except Exception as e:
+            db.rollback()
+            skipped_documents.append(
+                {
+                    "document_id": document.id,
+                    "filename": document.filename,
+                    "file_path": canonical_path,
+                    "reason": str(e),
+                }
+            )
+            continue
+
+        document.content = ingest_result["text"]
+        db.commit()
+
+        total_chunk_count += ingest_result["chunk_count"]
+        rebuilt_documents.append(
+            {
+                "document_id": document.id,
+                "filename": document.filename,
+                "file_path": document.file_path,
+                "chunk_count": ingest_result["chunk_count"],
+                "text_length": ingest_result["text_length"],
+            }
+        )
 
     return {
-        "message": "向量库重建成功",
-        "document_count": valid_document_count,
-        "chunk_count": len(all_chunks),
+        "message": "索引重建完成",
+        "document_count": len(documents),
+        "rebuilt_count": len(rebuilt_documents),
+        "skipped_count": len(skipped_documents),
+        "chunk_count": total_chunk_count,
+        "documents": rebuilt_documents,
+        "skipped_documents": skipped_documents,
     }
