@@ -1,39 +1,12 @@
 # Enterprise Knowledge Base
 
-一个基于 **FastAPI + Streamlit + LangChain + FAISS + MySQL** 的企业知识库问答系统。
+企业知识库问答系统，基于 **FastAPI + Streamlit + LangChain + FAISS + MySQL** 构建。
 
-系统支持批量上传企业文档，解析后写入 MySQL 与 FAISS 向量索引，并通过 RAG 方式调用大模型生成可追溯回答。当前前端已经包含文档上传、文档管理、切片查看、知识库重建和知识问答能力。
-
----
-
-## 1. 当前状态
-
-当前已完成：
-
-- 多格式文档上传：`txt`、`md`、`pdf`、`docx`、`csv`、`xlsx`
-- 上传文件统一保存到 `data/uploads`
-- 文档元数据与切片写入 MySQL
-- FAISS 向量索引写入与加载
-- 知识库索引重建
-- 删除文档后自动重建索引
-- 前端查看文档列表、切片数量和切片全文
-- 前端支持按关键词筛选当前文档切片
-- RAG 问答返回答案、来源片段、模型供应商、模型档位
-- 支持 Qwen / MIMO 模型供应商切换
-- embedding 优先使用本地 HuggingFace 模型，不可用时自动降级到本地哈希 embedding
-
-当前验证结果：
-
-```text
-documents = 12
-chunks = 87
-missing_paths = []
-faiss_index = index.faiss + index.pkl
-```
+项目目标是把企业内部文档解析成可检索的知识片段，并通过 RAG（Retrieval-Augmented Generation）方式调用大模型生成带来源依据的回答。
 
 ---
 
-## 2. 架构说明
+## 1. 项目架构
 
 ```text
 [Streamlit Frontend]
@@ -41,206 +14,188 @@ faiss_index = index.faiss + index.pkl
         v
 [FastAPI Backend]
    |
-   +--> Upload / Document API
-   |       |
-   |       +--> data/uploads
-   |       +--> MySQL: documents, document_chunks
+   +-- Document API
+   |      +-- 文件上传
+   |      +-- 文档列表
+   |      +-- 文档切片查看
+   |      +-- 文档删除
    |
-   +--> Ingest Pipeline
-   |       |
-   |       +--> 文档解析
-   |       +--> 文本切片
-   |       +--> embedding
-   |       +--> FAISS
+   +-- Ingest Pipeline
+   |      +-- 文档解析
+   |      +-- 文本切片
+   |      +-- 元数据入库
+   |      +-- 向量索引写入
    |
-   +--> RAG Pipeline
-           |
-           +--> FAISS TopK 检索
-           +--> Prompt 组装
-           +--> Qwen / MIMO
-           +--> 答案 + 来源片段
+   +-- RAG Pipeline
+          +-- 问题向量检索
+          +-- TopK 片段召回
+          +-- Prompt 组装
+          +-- 大模型回答
+          +-- 来源片段返回
 ```
 
-### 2.1 主要模块
+### 1.1 后端
 
-- `backend/main.py`：FastAPI 入口，提供上传、文档列表、切片查看、删除、重建、问答接口。
-- `backend/config.py`：配置读取，默认读取项目根目录 `.env`。
-- `backend/db.py`：SQLAlchemy 数据库连接。
-- `backend/models.py`：MySQL 表模型，包含 `documents` 和 `document_chunks`。
-- `backend/storage.py`：统一上传路径，兼容旧路径并修复历史混乱路径。
-- `backend/ingest.py`：文档解析、切片、写入切片表、写入 FAISS。
-- `backend/vector_store.py`：FAISS 读写、索引清理、embedding 获取与兜底。
-- `backend/rag.py`：检索增强问答逻辑。
-- `backend/llm.py`：Qwen / MIMO 统一调用。
-- `frontend/app.py`：Streamlit 前端界面。
+后端使用 FastAPI 提供 API 服务，主要负责：
 
----
+- 接收和保存上传文档
+- 解析文档内容
+- 生成文本切片
+- 写入 MySQL 元数据
+- 写入和重建 FAISS 向量索引
+- 执行 RAG 检索问答
+- 返回答案与来源片段
 
-## 3. 路径规则
+### 1.2 前端
 
-当前统一路径：
-
-```text
-data/uploads/
-```
-
-所有新上传文件都会保存到该目录。
-
-历史上项目曾出现过旧路径，例如：
-
-```text
-uploads/
-../uploads/
-../data/uploads/
-```
-
-现在 `backend/storage.py` 会在重建索引时按文件名自动查找这些旧路径。如果找到文件，会把数据库中的 `file_path` 修正为当前统一路径；如果找不到，会把该文档写入 `skipped_documents`，不会让整个重建流程失败。
-
----
-
-## 4. 数据库
-
-当前运行配置使用 MySQL：
-
-```env
-DATABASE_URL=mysql+pymysql://user:password@localhost:3306/enterprise_kb?charset=utf8mb4
-```
-
-代码里 `backend/config.py` 保留了 SQLite 默认值，只是兜底配置。实际运行以 `.env` 中的 `DATABASE_URL` 为准。
-
-主要表：
-
-- `documents`：文档记录，保存文件名、文件路径、解析文本、创建时间。
-- `document_chunks`：文档切片，保存文档 ID、切片文本、切片序号。
-
----
-
-## 5. 索引重建
-
-后端提供两个等价接口：
-
-```http
-POST /rebuild
-POST /documents/rebuild
-```
-
-重建流程：
-
-1. 清空 `backend/vector_store/faiss_index` 中的索引文件。
-2. 删除 MySQL 中的旧切片记录。
-3. 遍历所有文档记录。
-4. 使用 `resolve_document_path` 修正路径。
-5. 重新解析文档并切片。
-6. 写入 `document_chunks`。
-7. 写入新的 FAISS 索引。
-8. 返回成功文档、跳过文档和切片数量。
-
-注意：Windows 下不再删除整个 `faiss_index` 目录，只清空目录内容，避免目录被占用时出现 `PermissionError`。
-
----
-
-## 6. Embedding 策略
-
-系统优先使用 `.env` 中的：
-
-```env
-EMBEDDING_MODEL_NAME=sentence-transformers/all-MiniLM-L6-v2
-```
-
-加载方式为本地优先：
-
-```python
-model_kwargs={"device": "cpu", "local_files_only": True}
-```
-
-如果本地模型不可用，系统会自动降级到 `LocalHashEmbeddings`，保证上传、切片、重建和检索流程可以继续跑通。
-
-生产环境建议准备稳定的中文或多语言 embedding 模型，并确保服务机器可以离线加载该模型。
-
----
-
-## 7. 前端功能
-
-Streamlit 前端当前包含：
+前端使用 Streamlit 构建交互页面，主要负责：
 
 - 批量上传文档
-- 查看已上传文档
-- 查看每个文档的切片数量
-- 点击“查看切片”查看切片全文
-- 按关键词筛选当前文档切片
-- 删除文档
-- 重建知识库索引
-- 选择模型供应商：Qwen / MIMO
-- 选择模型档位：fast / default / strong
-- 知识库问答
-- 查看回答来源片段
+- 展示已上传文档
+- 查看文档切片
+- 触发知识库重建
+- 配置模型供应商与模型档位
+- 发起知识库问答
+- 展示回答和参考来源
+
+### 1.3 数据层
+
+数据层由 MySQL 和 FAISS 组成：
+
+- MySQL 保存文档记录和切片记录。
+- FAISS 保存文本切片的向量索引，用于相似度检索。
+- 上传文件保存在本地文件目录中，数据库只保存文件元数据和解析后的文本信息。
 
 ---
 
-## 8. API 概览
+## 2. 构建思路
 
-### 健康检查
+### 2.1 文档入库
+
+文档入库流程：
+
+1. 用户在前端上传文档。
+2. 后端保存原始文件。
+3. 根据文件类型提取正文内容。
+4. 使用文本切分器将正文拆成 chunk。
+5. 将文档信息和 chunk 信息写入 MySQL。
+6. 将 chunk 写入 FAISS 向量索引。
+
+当前支持的文件格式：
+
+- `txt`
+- `md`
+- `pdf`
+- `docx`
+- `csv`
+- `xlsx`
+
+### 2.2 知识库问答
+
+问答流程：
+
+1. 用户输入问题。
+2. 后端加载 FAISS 索引。
+3. 根据问题召回最相关的 TopK 文档片段。
+4. 将召回片段和用户问题组装成 RAG Prompt。
+5. 调用指定大模型生成回答。
+6. 返回回答内容、模型信息和来源片段。
+
+### 2.3 索引重建
+
+重建流程用于保证数据库切片和 FAISS 索引保持一致：
+
+1. 清理旧的向量索引。
+2. 清理旧的切片记录。
+3. 重新遍历已有文档。
+4. 重新解析、切片、入库。
+5. 重新生成 FAISS 索引。
+
+删除文档后也会触发索引同步，避免已删除文档继续参与检索。
+
+### 2.4 模型调用
+
+系统通过统一的 LLM 调用层管理不同模型供应商。
+
+当前支持：
+
+- Qwen
+- MIMO
+
+模型档位分为：
+
+- `fast`：更快响应，适合简单问题。
+- `default`：默认模式，兼顾速度和效果。
+- `strong`：更强模型，适合复杂总结和推理。
+
+### 2.5 Embedding
+
+系统优先使用本地 HuggingFace embedding 模型生成向量。
+
+如果本地模型不可用，会降级到本地哈希 embedding，保证开发环境下基础流程仍可运行。生产环境建议使用稳定的中文或多语言 embedding 模型。
+
+---
+
+## 3. 目前功能
+
+### 3.1 文档管理
+
+- 批量上传文档
+- 查看文档列表
+- 查看文档路径和上传时间
+- 查看每个文档的切片数量
+- 查看文档切片全文
+- 按关键词筛选当前文档切片
+- 删除文档
+
+### 3.2 知识库索引
+
+- 上传后自动写入向量索引
+- 支持手动重建知识库索引
+- 删除文档后同步更新索引
+- 支持索引为空时的提示和兜底逻辑
+
+### 3.3 问答能力
+
+- 基于知识库片段回答问题
+- 返回来源片段，便于追溯
+- 支持模型供应商切换
+- 支持模型档位切换
+- 支持在无知识库结果时选择是否允许通用回答
+
+### 3.4 前端页面
+
+当前 Streamlit 前端包含：
+
+- 文档上传区
+- 已上传文档区
+- 切片查看区
+- 知识库操作区
+- 模型配置区
+- 问答对话区
+- 来源片段展示区
+
+---
+
+## 4. 主要 API
 
 ```http
 GET /
-```
-
-### 上传文档
-
-```http
 POST /upload
-```
-
-### 文档列表
-
-```http
 GET /documents
-```
-
-### 查看文档切片
-
-```http
 GET /documents/{document_id}/chunks
-```
-
-### 删除文档
-
-```http
 DELETE /documents/{document_id}
-```
-
-删除后会自动重建索引。
-
-### 重建索引
-
-```http
 POST /rebuild
 POST /documents/rebuild
-```
-
-### 知识问答
-
-```http
 POST /ask
 POST /chat
 ```
 
-请求示例：
-
-```json
-{
-  "question": "请总结这份文档的主要内容",
-  "provider": "qwen",
-  "model_level": "default",
-  "allow_general_answer": false
-}
-```
-
 ---
 
-## 9. 本地运行
+## 5. 本地运行
 
-### 9.1 安装依赖
+### 5.1 安装依赖
 
 ```powershell
 python -m venv .venv
@@ -248,68 +203,42 @@ python -m venv .venv
 pip install -r requirements.txt
 ```
 
-当前项目本机也存在外层虚拟环境：
+### 5.2 配置环境变量
 
-```powershell
-..\EKB_env\Scripts\python.exe
-```
+复制 `.env_example` 为 `.env`，然后填写数据库连接和模型 API Key。
 
-### 9.2 配置环境变量
-
-项目提供 `.env_example` 作为模板。真实 `.env` 不应提交到仓库。
-
-需要重点配置：
+关键配置：
 
 - `DATABASE_URL`
+- `EMBEDDING_MODEL_NAME`
+- `DEFAULT_LLM_PROVIDER`
+- `DEFAULT_MODEL_LEVEL`
 - `DASHSCOPE_API_KEY`
 - `MIMO_API_KEY`
-- `EMBEDDING_MODEL_NAME`
 
-### 9.3 启动后端
+### 5.3 启动后端
 
 ```powershell
 uvicorn backend.main:app --host 0.0.0.0 --port 8000 --reload
 ```
 
-默认 API：
-
-```text
-http://127.0.0.1:8000
-```
-
-### 9.4 启动前端
+### 5.4 启动前端
 
 ```powershell
 streamlit run frontend/app.py
 ```
 
-默认页面：
-
-```text
-http://localhost:8501
-```
-
 ---
 
-## 10. Git 注意事项
+## 6. 仓库说明
 
-`.gitignore` 已忽略：
+以下内容不应提交到 Git：
 
 - `.env`
-- 虚拟环境
-- `__pycache__`
-- `data/uploads/*`
-- `backend/vector_store/faiss_index/`
+- 本地虚拟环境
+- Python 缓存文件
+- 上传的业务文档
+- FAISS 本地索引文件
 - 本地数据库文件
 
-不要提交真实业务文件、真实 API Key、FAISS 索引文件或 Python 缓存文件。
-
----
-
-## 11. 下一步建议
-
-1. 清理已有 `__pycache__` 和历史根目录 `uploads` 脏文件。
-2. 优化前端中文编码显示，确保所有文案稳定为 UTF-8。
-3. 增加 `/ask/stream` 流式问答接口。
-4. 增加检索评分、rerank 和命中片段高亮。
-5. 增加权限控制、审计日志和多用户隔离。
+仓库中只保留源码、依赖说明、配置模板和项目文档。
