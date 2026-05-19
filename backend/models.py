@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy import DateTime, ForeignKey, Integer, String, Text,Column
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .db import Base
@@ -77,3 +77,13 @@ class DocumentChunk(Base):
         "Document",
         back_populates="chunks",
     )
+    
+class QAHistory(Base):
+    __tablename__ = "qa_history"
+
+    id = Column(Integer, primary_key=True, index=True)
+    question = Column(Text, nullable=False)
+    answer = Column(Text, nullable=False)
+    sources = Column(Text, nullable=True)
+    model_name = Column(String(100), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)

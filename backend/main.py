@@ -1,4 +1,6 @@
-from fastapi import Depends, FastAPI, File, HTTPException, UploadFile
+import json
+from typing import List
+from fastapi import Depends, FastAPI, File, HTTPException, UploadFile,Query
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -8,9 +10,15 @@ from .db import Base, engine, get_db
 from .ingest import ingest_file
 from .models import Document, DocumentChunk
 from .rag import rag_answer
-from .schemas import QuestionRequest
 from .storage import get_upload_path, resolve_document_path, safe_upload_filename
 from .vector_store import reset_faiss_index
+from .schemas import QuestionRequest, RetrieveRequest
+from .vector_store import retrieve_top_k
+
+
+
+from .models import Document, QAHistory
+from .schemas import QuestionRequest, QAHistoryResponse
 
 
 settings = get_settings()
@@ -148,8 +156,7 @@ def get_document_chunks(
     }
 
 
-@app.post("/rebuild")
-def rebuild_index(db: Session = Depends(get_db)):
+def rebuild_document_index(db: Session):
     documents = db.query(Document).order_by(Document.id.asc()).all()
 
     if not documents:
@@ -243,7 +250,7 @@ def rebuild_index(db: Session = Depends(get_db)):
 
 @app.post("/documents/rebuild")
 def rebuild_documents_index(db: Session = Depends(get_db)):
-    return rebuild_index(db=db)
+    return rebuild_document_index(db=db)
 
 
 @app.delete("/documents/{document_id}")
@@ -262,7 +269,7 @@ def delete_document(document_id: int, db: Session = Depends(get_db)):
     if file_path.exists():
         file_path.unlink()
 
-    rebuild_result = rebuild_index(db=db)
+    rebuild_result = rebuild_document_index(db=db)
 
     return {
         "message": "文档删除成功，知识库索引已重建",
@@ -273,8 +280,14 @@ def delete_document(document_id: int, db: Session = Depends(get_db)):
 
 
 @app.post("/ask")
-def ask_question(request: QuestionRequest, db: Session = Depends(get_db)):
-    return rag_answer(
+def ask_question(
+    request: QuestionRequest,
+    db: Session = Depends(get_db),
+):
+    if not request.question.strip():
+        raise HTTPException(status_code=400, detail="问题不能为空")
+
+    result = rag_answer(
         question=request.question,
         db=db,
         provider=request.provider,
@@ -282,7 +295,41 @@ def ask_question(request: QuestionRequest, db: Session = Depends(get_db)):
         allow_general_answer=request.allow_general_answer,
     )
 
+    # 兼容两种情况：
+    # 1. rag_answer 返回字符串
+    # 2. rag_answer 返回 dict，例如 {"answer": "...", "sources": [...]}
+    if isinstance(result, dict):
+        answer = result.get("answer", "")
+        sources = result.get("sources", [])
+    else:
+        answer = str(result)
+        sources = []
 
+    history = QAHistory(
+        question=request.question,
+        answer=answer,
+        sources=json.dumps(sources, ensure_ascii=False),
+        model_name=result.get("model") if isinstance(result, dict) else None,
+    )
+
+    db.add(history)
+    db.commit()
+    db.refresh(history)
+
+    response = result.copy() if isinstance(result, dict) else {}
+    response.update(
+        {
+            "question": request.question,
+            "answer": answer,
+            "sources": sources,
+            "history_id": history.id,
+        }
+    )
+
+    return response
+    
+    
+    
 @app.post("/chat")
 def chat(request: QuestionRequest, db: Session = Depends(get_db)):
     return rag_answer(
@@ -292,3 +339,48 @@ def chat(request: QuestionRequest, db: Session = Depends(get_db)):
         model_level=request.model_level,
         allow_general_answer=request.allow_general_answer,
     )
+
+@app.post("/retrieve")
+def retrieve_documents(request: RetrieveRequest):
+    if not request.question.strip():
+        raise HTTPException(status_code=400, detail="问题不能为空")
+
+    results = retrieve_top_k(
+        question=request.question,
+        top_k=request.top_k,
+    )
+
+    return {
+        "question": request.question,
+        "top_k": request.top_k,
+        "results": results,
+    }
+    
+@app.get("/history", response_model=List[QAHistoryResponse])
+def get_qa_history(
+    limit: int = Query(default=20, ge=1, le=100),
+    db: Session = Depends(get_db),
+):
+    histories = (
+        db.query(QAHistory)
+        .order_by(QAHistory.created_at.desc())
+        .limit(limit)
+        .all()
+    )
+
+    return histories
+
+@app.delete("/history/{history_id}")
+def delete_qa_history(
+    history_id: int,
+    db: Session = Depends(get_db),
+):
+    history = db.query(QAHistory).filter(QAHistory.id == history_id).first()
+
+    if not history:
+        raise HTTPException(status_code=404, detail="历史记录不存在")
+
+    db.delete(history)
+    db.commit()
+
+    return {"message": "历史记录删除成功", "history_id": history_id}

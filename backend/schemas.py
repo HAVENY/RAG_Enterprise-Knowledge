@@ -1,5 +1,6 @@
 from pydantic import BaseModel, Field
-
+from datetime import datetime
+from typing import Optional
 
 class QuestionRequest(BaseModel):
     question: str = Field(..., description="用户问题")
@@ -18,3 +19,27 @@ class QuestionRequest(BaseModel):
         default=False,
         description="无知识库时是否允许通用回答",
     )
+    
+class QAHistoryResponse(BaseModel):
+    id: int
+    question: str
+    answer: str
+    sources: Optional[str] = None
+    model_name: Optional[str] = None
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class AskResponse(BaseModel):
+    question: str
+    answer: str
+    sources: Optional[list] = []
+    
+class RetrieveRequest(BaseModel):
+    question: str
+    top_k: int = 5
+    
+    
+    
